@@ -1,0 +1,2 @@
+# windsurf_manager
+manager_windsurf_accounts_easily
