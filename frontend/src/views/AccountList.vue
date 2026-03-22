@@ -14,8 +14,8 @@
       </div>
     </div>
 
-    <el-table :data="accounts" stripe style="width: 100%" v-loading="loading">
-      <el-table-column label="Name" width="160">
+    <el-table class="account-table" :data="accounts" stripe style="width: 100%" v-loading="loading">
+      <el-table-column label="Name" width="170">
         <template #default="{ row }">
           <div>
             <strong>{{ row.display_name || row.name }}</strong>
@@ -27,47 +27,47 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column prop="email" label="Email" width="210" />
-      <el-table-column label="Refresh Time" width="170">
+      <el-table-column prop="email" label="Email" width="220" />
+      <el-table-column label="Refresh Time" width="180">
         <template #default="{ row }">
           <span v-if="row.quota_updated_at" style="font-size: 12px;">{{ formatRefreshTime(row.quota_updated_at) }}</span>
           <span v-else style="color: #c0c4cc; font-size: 12px;">--</span>
         </template>
       </el-table-column>
-      <el-table-column label="Status" width="80">
+      <el-table-column label="Status" width="90">
         <template #default="{ row }">
           <el-tag :type="row.is_active ? 'success' : 'info'" size="small">
             {{ row.is_active ? 'Active' : 'Inactive' }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="Daily Quota" width="140">
+      <el-table-column label="Daily Quota" width="135">
         <template #default="{ row }">
           <QuotaBar v-if="row.daily_quota_pct != null" :pct="row.daily_quota_pct" label="Daily" />
           <span v-else style="color: #c0c4cc; font-size: 12px;">--</span>
         </template>
       </el-table-column>
-      <el-table-column label="Weekly Quota" width="140">
+      <el-table-column label="Weekly Quota" width="135">
         <template #default="{ row }">
           <QuotaBar v-if="row.weekly_quota_pct != null" :pct="row.weekly_quota_pct" label="Weekly" />
           <span v-else style="color: #c0c4cc; font-size: 12px;">--</span>
         </template>
       </el-table-column>
-      <el-table-column label="Expiry" width="120">
+      <el-table-column label="Expiry" width="125">
         <template #default="{ row }">
           <span v-if="row.plan_expiry" style="font-size: 13px;">{{ row.plan_expiry }}</span>
           <span v-else style="color: #c0c4cc; font-size: 12px;">--</span>
         </template>
       </el-table-column>
-      <el-table-column label="Balance" width="80">
+      <el-table-column label="Balance" width="90">
         <template #default="{ row }">
           <span v-if="row.extra_balance" style="font-size: 13px;">{{ row.extra_balance }}</span>
           <span v-else style="color: #c0c4cc; font-size: 12px;">--</span>
         </template>
       </el-table-column>
-      <el-table-column label="Actions" min-width="240">
+      <el-table-column label="Actions" width="390">
         <template #default="{ row }">
-          <el-button-group>
+          <div class="actions-cell">
             <el-button
               type="success"
               size="small"
@@ -97,7 +97,7 @@
             >
               <el-icon><Delete /></el-icon>
             </el-button>
-          </el-button-group>
+          </div>
         </template>
       </el-table-column>
     </el-table>
@@ -237,3 +237,22 @@ async function handleRefreshAllStatus() {
   }
 }
 </script>
+
+<style scoped>
+.account-table :deep(.el-table__cell) {
+  padding: 12px 0;
+}
+
+.actions-cell {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.actions-cell :deep(.el-button) {
+  margin-left: 0;
+  white-space: nowrap;
+}
+</style>
