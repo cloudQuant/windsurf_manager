@@ -14,7 +14,14 @@
       </div>
     </div>
 
-    <el-table class="account-table" :data="accounts" stripe style="width: 100%" v-loading="loading">
+    <el-table
+      class="account-table"
+      :data="accounts"
+      :default-sort="{ prop: 'plan_expiry', order: 'ascending' }"
+      stripe
+      style="width: 100%"
+      v-loading="loading"
+    >
       <el-table-column label="Name" width="170">
         <template #default="{ row }">
           <div>
@@ -53,7 +60,7 @@
           <span v-else style="color: #c0c4cc; font-size: 12px;">--</span>
         </template>
       </el-table-column>
-      <el-table-column label="Expiry" width="125">
+      <el-table-column prop="plan_expiry" label="Expiry" width="140" sortable :sort-method="sortByPlanExpiry">
         <template #default="{ row }">
           <span v-if="row.plan_expiry" style="font-size: 13px;">{{ row.plan_expiry }}</span>
           <span v-else style="color: #c0c4cc; font-size: 12px;">--</span>
@@ -161,6 +168,19 @@ function formatRefreshTime(value) {
   }
   const pad = num => String(num).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+function parseExpiryValue(value) {
+  if (!value) {
+    return Number.POSITIVE_INFINITY
+  }
+
+  const timestamp = new Date(value).getTime()
+  return Number.isNaN(timestamp) ? Number.POSITIVE_INFINITY : timestamp
+}
+
+function sortByPlanExpiry(a, b) {
+  return parseExpiryValue(a.plan_expiry) - parseExpiryValue(b.plan_expiry)
 }
 
 function handleEdit(row) {

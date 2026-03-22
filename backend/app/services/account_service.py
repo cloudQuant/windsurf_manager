@@ -1,12 +1,46 @@
 """
 Account service: orchestrates import, activate (local + web), quota refresh.
 """
+import os
+import re
+from pathlib import Path
 from typing import Dict, Optional
 
+from dotenv import dotenv_values, unset_key
 from sqlalchemy.orm import Session
 
 from app import crud
 from app.services import windsurf_local, windsurf_web
+
+
+_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+_ENV_ACCOUNT_PATTERN = re.compile(r"WINDSURF_ACCOUNT_\d+$")
+
+
+def _split_env_account(value: str) -> tuple[Optional[str], Optional[str]]:
+    parts = re.split(r"\s{2,}", value.strip(), maxsplit=1)
+    if len(parts) != 2:
+        return None, None
+    return parts[0].strip(), parts[1].strip()
+
+
+def _remove_env_accounts(email: str) -> int:
+    target_email = (email or "").strip().lower()
+    if not target_email or not _ENV_PATH.exists():
+        return 0
+
+    removed = 0
+    for key, value in dotenv_values(_ENV_PATH).items():
+        if key is None or value is None or not _ENV_ACCOUNT_PATTERN.match(key):
+            continue
+        parsed_email, _ = _split_env_account(value)
+        if not parsed_email or parsed_email.lower() != target_email:
+            continue
+        unset_key(str(_ENV_PATH), key)
+        os.environ.pop(key, None)
+        removed += 1
+
+    return removed
 
 
 def import_current(db: Session) -> Dict:
@@ -53,6 +87,27 @@ def import_current(db: Session) -> Dict:
         "success": True,
         "message": result["message"],
         "account_id": account.id,
+    }
+
+
+def delete_account(db: Session, account_id: int) -> Dict:
+    account = crud.get_account(db, account_id)
+    if not account:
+        return {"success": False, "message": "Account not found", "env_entries_removed": 0}
+
+    env_entries_removed = _remove_env_accounts(account.email)
+    if not crud.delete_account(db, account_id):
+        return {"success": False, "message": "Account not found", "env_entries_removed": env_entries_removed}
+
+    entry_label = "entry" if env_entries_removed == 1 else "entries"
+    message = "Account deleted"
+    if env_entries_removed:
+        message = f"Account deleted and removed {env_entries_removed} .env {entry_label}"
+
+    return {
+        "success": True,
+        "message": message,
+        "env_entries_removed": env_entries_removed,
     }
 
 

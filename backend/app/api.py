@@ -63,9 +63,10 @@ def update_account(account_id: int, data: schemas.AccountUpdate, db: Session = D
 
 @router.delete("/{account_id}")
 def delete_account(account_id: int, db: Session = Depends(get_db)):
-    if not crud.delete_account(db, account_id):
+    result = account_service.delete_account(db, account_id)
+    if not result["success"]:
         raise HTTPException(status_code=404, detail="Account not found")
-    return {"success": True, "message": "Account deleted"}
+    return result
 
 
 @router.post("/{account_id}/activate", response_model=schemas.ActivateResult)
