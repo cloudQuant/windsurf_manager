@@ -272,7 +272,7 @@ async def activate_account(db: Session, account_id: int) -> Dict:
             "web_logged_in": False,
         }
 
-    web_result = await windsurf_web.login_in_default_browser(account.email, password)
+    web_result = windsurf_web.login_in_default_browser(account.email, password)
     web_logged_in = web_result.get("success", False)
     web_msg = web_result.get("message", "Default browser login failed")
 

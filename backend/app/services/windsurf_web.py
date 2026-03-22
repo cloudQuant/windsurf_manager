@@ -1,6 +1,7 @@
 """
 Windsurf web login & quota scraping via Playwright.
 """
+import base64
 import asyncio
 import gzip
 import json
@@ -8,6 +9,7 @@ import os
 import plistlib
 import re
 import subprocess
+import sys
 import time
 from typing import Dict, Optional
 from urllib import error as urllib_error
@@ -19,7 +21,12 @@ USAGE_URL = "https://windsurf.com/subscription/usage"
 CHROME_BUNDLE_ID = "com.google.chrome"
 CHROME_APP_NAME = "Google Chrome"
 LAUNCH_SERVICES_PLIST = os.path.expanduser("~/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist")
-WINDSURF_LOGOUT_JS = 'document.querySelector("body > div.flex.min-h-screen.flex-col > div > div > div.sticky.top-0.col-span-1.hidden.h-screen.shrink-0.flex-col.pb-6.pt-28.md\\\\:pt-36.lg\\\\:flex > div > div.mt-auto.flex.flex-col.gap-1.px-4 > div").click()'
+WINDSURF_LOGOUT_SELECTOR = "body > div.flex.min-h-screen.flex-col > div > div > div.sticky.top-0.col-span-1.hidden.h-screen.shrink-0.flex-col.pb-6.pt-28.md\\:pt-36.lg\\:flex > div > div.mt-auto.flex.flex-col.gap-1.px-4 > div"
+WINDSURF_LOGOUT_XPATH = "/html/body/div[2]/div/div/div[1]/div/div[2]/div"
+WINDSURF_LOGOUT_LABELS = ["Log out", "Logout", "Sign out"]
+
+_IS_WINDOWS = sys.platform == "win32"
+_IS_MACOS = sys.platform == "darwin"
 
 
 async def _new_context(headless: bool = False, channel: Optional[str] = None):
@@ -56,7 +63,23 @@ def _run_osascript(lines: list[str], timeout: int = 30) -> subprocess.CompletedP
 
 
 def _copy_to_clipboard(text: str) -> None:
-    subprocess.run(["pbcopy"], input=text, text=True, check=True, timeout=10)
+    if _IS_WINDOWS:
+        subprocess.run(["clip"], input=text, text=True, check=True, timeout=10)
+    else:
+        subprocess.run(["pbcopy"], input=text, text=True, check=True, timeout=10)
+
+
+def _read_clipboard_text() -> str:
+    if _IS_WINDOWS:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return (result.stdout or "").rstrip("\r\n") if result.returncode == 0 else ""
+    result = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=10)
+    return (result.stdout or "").rstrip("\r\n") if result.returncode == 0 else ""
 
 
 def _chrome_open_url_in_new_tab(url: str) -> Dict:
@@ -73,7 +96,7 @@ def _chrome_open_url_in_new_tab(url: str) -> Dict:
     try:
         result = _run_osascript(lines)
         if result.returncode == 0:
-            return {"success": True, "message": f"Opened {url} in Google Chrome"}
+            return {"success": True, "message": f"Opened {url} in new tab"}
         stderr = (result.stderr or result.stdout or "").strip()
         return {"success": False, "message": f"Failed to open Google Chrome tab: {stderr or 'unknown osascript error'}"}
     except Exception as exc:
@@ -202,6 +225,32 @@ def _build_windsurf_login_js(email: str, password: str) -> str:
     )
 
 
+def _build_windsurf_logout_js() -> str:
+    import json as _json
+    return (
+        "(()=>{"
+        "const click=(el)=>{"
+        "if(!el)return;"
+        "const target=el.closest?.('button,a,[role=\"button\"],div,span')||el;"
+        "try{target.scrollIntoView({block:'center',inline:'center'});}catch(e){}"
+        "for(const type of ['mouseover','mousedown','mouseup','click']){try{target.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,view:window}));}catch(e){}}"
+        "try{target.click();}catch(e){}"
+        "};"
+        f"let el=document.querySelector({_json.dumps(WINDSURF_LOGOUT_SELECTOR)});"
+        "if(el){click(el);return;}"
+        "try{el=document.evaluate("
+        f"{_json.dumps(WINDSURF_LOGOUT_XPATH)}"
+        ",document,null,XPathResult.FIRST_ORDERED_NODE_TYPE,null).singleNodeValue;}catch(e){el=null;}"
+        "if(el){click(el);return;}"
+        f"const labels={_json.dumps(WINDSURF_LOGOUT_LABELS)};"
+        "for(const label of labels){"
+        "el=[...document.querySelectorAll('button,a,div,span,[role=\"button\"]')].find(n=>((n.innerText||n.textContent||'').trim().toLowerCase()===label.toLowerCase()));"
+        "if(el){click(el);return;}"
+        "}"
+        "})();"
+    )
+
+
 def _login_in_default_browser_chrome(email: str, password: str) -> Dict:
     nav = _navigate_chrome_to(USAGE_URL)
     if not nav.get("success"):
@@ -225,7 +274,7 @@ def _login_in_default_browser_chrome(email: str, password: str) -> Dict:
     logout_message = "No logout needed"
 
     if "/account/login" not in current_url:
-        logout_exec = _chrome_execute_js(WINDSURF_LOGOUT_JS)
+        logout_exec = _chrome_execute_js(_build_windsurf_logout_js())
         if not logout_exec.get("success"):
             return {
                 "success": False,
@@ -271,6 +320,263 @@ def _login_in_default_browser_chrome(email: str, password: str) -> Dict:
     }
 
 
+def _find_browser_path_windows() -> tuple[Optional[str], str]:
+    """Find Chrome or Edge executable on Windows. Returns (path, name)."""
+    candidates = [
+        ("Chrome", "chrome.exe", [
+            os.path.join(os.environ.get("PROGRAMFILES", ""), "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(os.environ.get("PROGRAMFILES(X86)", ""), "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "Application", "chrome.exe"),
+        ]),
+        ("Edge", "msedge.exe", [
+            os.path.join(os.environ.get("PROGRAMFILES", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+            os.path.join(os.environ.get("PROGRAMFILES(X86)", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+        ]),
+    ]
+    installed: list[tuple[str, str]] = []
+    for name, _exe, paths in candidates:
+        for p in paths:
+            if p and os.path.isfile(p):
+                installed.append((p, name))
+                break
+    for p, name in installed:
+        if _is_browser_running_windows(name):
+            return p, name
+    return installed[0] if installed else (None, "")
+
+
+def _is_port_open(port: int) -> bool:
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            return s.connect_ex(("127.0.0.1", port)) == 0
+    except Exception:
+        return False
+
+
+def _is_browser_running_windows(browser_name: str) -> bool:
+    exe = "chrome.exe" if browser_name == "Chrome" else "msedge.exe"
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {exe}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return exe.lower() in result.stdout.lower()
+    except Exception:
+        return False
+
+
+def _windows_send_keys(browser_name: str, keys: list[str], settle_ms: int = 400, key_delay_ms: int = 250) -> Dict:
+    titles = ["Google Chrome", "Chrome"] if browser_name == "Chrome" else ["Microsoft Edge", "Edge"]
+    title_array = ", ".join(json.dumps(title) for title in titles)
+    key_lines = "\n".join(
+        f"$ws.SendKeys({json.dumps(key)}); Start-Sleep -Milliseconds {key_delay_ms}"
+        for key in keys
+    )
+    script = (
+        "$ws = New-Object -ComObject WScript.Shell\n"
+        "$ok = $false\n"
+        f"foreach ($title in @({title_array})) {{ if ($ws.AppActivate($title)) {{ $ok = $true; break }} }}\n"
+        "if (-not $ok) { exit 1 }\n"
+        f"Start-Sleep -Milliseconds {settle_ms}\n"
+        f"{key_lines}\n"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return {"success": True, "message": f"Sent keys to {browser_name}"}
+        stderr = (result.stderr or result.stdout or "").strip()
+        return {"success": False, "message": f"Failed to send keys to {browser_name}: {stderr or 'browser window not found'}"}
+    except Exception as exc:
+        return {"success": False, "message": f"Failed to send keys to {browser_name}: {exc}"}
+
+
+def _launch_browser_windows(browser_path: str, url: str) -> Dict:
+    try:
+        subprocess.Popen([browser_path, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return {"success": True, "message": f"Opened {url} in browser"}
+    except Exception as exc:
+        return {"success": False, "message": f"Failed to open browser: {exc}"}
+
+
+def _windows_open_url_in_new_tab(browser_path: str, browser_name: str, url: str) -> Dict:
+    if not _is_browser_running_windows(browser_name):
+        return _launch_browser_windows(browser_path, url)
+    previous_clipboard = _read_clipboard_text()
+    try:
+        _copy_to_clipboard(url)
+        sent = _windows_send_keys(browser_name, ["^t", "^l", "^v", "~"])
+        if not sent.get("success"):
+            return sent
+        return {"success": True, "message": f"Opened {url} in new {browser_name} tab"}
+    finally:
+        try:
+            _copy_to_clipboard(previous_clipboard)
+        except Exception:
+            pass
+
+
+def _windows_set_active_tab_url(browser_name: str, url: str) -> Dict:
+    previous_clipboard = _read_clipboard_text()
+    try:
+        _copy_to_clipboard(url)
+        sent = _windows_send_keys(browser_name, ["^l", "^v", "~"])
+        if not sent.get("success"):
+            return sent
+        return {"success": True, "message": f"Opened {url} in active {browser_name} tab"}
+    finally:
+        try:
+            _copy_to_clipboard(previous_clipboard)
+        except Exception:
+            pass
+
+
+def _windows_get_active_tab_url(browser_name: str) -> Dict:
+    previous_clipboard = _read_clipboard_text()
+    try:
+        sent = _windows_send_keys(browser_name, ["^l", "^c"])
+        if not sent.get("success"):
+            return sent
+        time.sleep(0.3)
+        return {"success": True, "url": _read_clipboard_text()}
+    finally:
+        try:
+            _copy_to_clipboard(previous_clipboard)
+        except Exception:
+            pass
+
+
+def _windows_wait_for_active_tab_url(browser_name: str, predicate, timeout_seconds: int, description: str) -> Dict:
+    deadline = time.time() + timeout_seconds
+    last_url = ""
+    last_message = ""
+    while time.time() < deadline:
+        current = _windows_get_active_tab_url(browser_name)
+        if not current.get("success"):
+            last_message = current.get("message") or last_message
+            time.sleep(1)
+            continue
+        last_url = current.get("url") or ""
+        if predicate(last_url.lower()):
+            return {"success": True, "url": last_url, "message": f"Reached {description}"}
+        time.sleep(1)
+    if last_url:
+        return {"success": False, "url": last_url, "message": f"Timed out waiting for {description}; last URL was {last_url}"}
+    return {"success": False, "url": last_url, "message": last_message or f"Timed out waiting for {description}"}
+
+
+def _windows_ascii_send_keys(text: str) -> str:
+    return "".join(f"{{ASC {ord(ch)}}}" for ch in text)
+
+
+def _windows_execute_js(browser_name: str, js_code: str) -> Dict:
+    try:
+        javascript_url = "javascript:" + js_code.replace("\r", " ").replace("\n", " ")
+        sent = _windows_send_keys(browser_name, ["^l", _windows_ascii_send_keys(javascript_url), "~"], key_delay_ms=120)
+        if not sent.get("success"):
+            return sent
+        return {"success": True, "message": f"Executed JS in {browser_name}"}
+    except Exception as exc:
+        return {"success": False, "message": f"Failed to execute JS in {browser_name}: {exc}"}
+
+
+def _login_in_default_browser_windows(email: str, password: str) -> Dict:
+    """
+    Windows equivalent of _login_in_default_browser_chrome.
+    Uses raw CDP to control the existing browser – no Playwright.
+    Flow: new tab → wait for load → logout if needed → fill login → wait for redirect.
+    """
+    import logging
+    log = logging.getLogger("windsurf_web.win_login")
+    browser_path, browser_name = _find_browser_path_windows()
+    log.warning("[WIN_LOGIN] browser_path=%s browser_name=%s", browser_path, browser_name)
+    if not browser_path:
+        return {"success": False, "message": "Could not find Chrome or Edge on this system"}
+
+    nav = _windows_open_url_in_new_tab(browser_path, browser_name, USAGE_URL)
+    log.warning("[WIN_LOGIN] open_new_tab=%s", nav)
+    if not nav.get("success"):
+        return nav
+
+    page_load = _windows_wait_for_active_tab_url(browser_name, lambda url: "windsurf.com" in url, 15, "Windsurf page load")
+    log.warning("[WIN_LOGIN] page_load=%s", page_load)
+    if not page_load.get("success"):
+        return {
+            "success": False,
+            "message": f"Failed to navigate to Windsurf in {browser_name}: {page_load.get('message', 'unknown')}",
+        }
+
+    time.sleep(3)
+
+    current = _windows_get_active_tab_url(browser_name)
+    current_url = (current.get("url") or "").lower() if current.get("success") else ""
+    log.warning("[WIN_LOGIN] current_url=%s", current_url)
+    logout_message = "No logout needed"
+
+    if "/account/login" not in current_url:
+        firebase_uid = _get_windows_logout_firebase_uid(email)
+        log.warning("[WIN_LOGIN] firebase_uid_for_logout=%s", firebase_uid)
+        if not firebase_uid:
+            return {
+                "success": False,
+                "message": "Could not determine firebase UID for Windsurf logout",
+            }
+        logout_exec = _logout_user_sync(firebase_uid)
+        log.warning("[WIN_LOGIN] logout_exec=%s", logout_exec)
+        if not logout_exec.get("success"):
+            return {
+                "success": False,
+                "message": f"Failed to log out current Windsurf web session: {logout_exec.get('message', 'unknown logout failure')}",
+            }
+        nav_login = _windows_set_active_tab_url(browser_name, LOGIN_URL)
+        log.warning("[WIN_LOGIN] nav_login=%s", nav_login)
+        if not nav_login.get("success"):
+            return nav_login
+        login_wait = _windows_wait_for_active_tab_url(
+            browser_name,
+            lambda url: "/account/login" in url,
+            15,
+            "Windsurf login page after logout",
+        )
+        log.warning("[WIN_LOGIN] login_wait_after_direct_logout=%s", login_wait)
+        if not login_wait.get("success"):
+            return {
+                "success": False,
+                "message": f"Logout request succeeded but Windsurf did not reach the login page: {login_wait.get('message')}",
+            }
+        logout_message = "Logged out current Windsurf web session"
+
+    time.sleep(2)
+
+    login_js = _build_windsurf_login_js(email, password)
+    login_exec = _windows_execute_js(browser_name, login_js)
+    log.warning("[WIN_LOGIN] login_exec=%s", login_exec)
+    if not login_exec.get("success"):
+        return {
+            "success": False,
+            "message": f"{logout_message} | Failed to fill login form: {login_exec['message']}",
+        }
+
+    completed = _windows_wait_for_active_tab_url(browser_name, lambda url: url.startswith("https://windsurf.com/") and "/account/login" not in url, 40, "Windsurf account page after login")
+    log.warning("[WIN_LOGIN] completed=%s", completed)
+    if not completed.get("success"):
+        return {
+            "success": False,
+            "message": f"{logout_message} | Login form submitted for {email}, but did not leave the login page: {completed['message']}",
+        }
+
+    return {
+        "success": True,
+        "message": f"{logout_message} | Logged into Windsurf web for {email} in {browser_name}.",
+    }
+
+
 def _login_in_default_browser_sync(email: str, password: str) -> Dict:
     bundle_id = _default_browser_bundle_id()
     if bundle_id and bundle_id != CHROME_BUNDLE_ID:
@@ -286,8 +592,10 @@ def _login_in_default_browser_sync(email: str, password: str) -> Dict:
     return _login_in_default_browser_chrome(email, password)
 
 
-async def login_in_default_browser(email: str, password: str) -> Dict:
-    return await asyncio.to_thread(_login_in_default_browser_sync, email, password)
+def login_in_default_browser(email: str, password: str) -> Dict:
+    if _IS_WINDOWS:
+        return _login_in_default_browser_windows(email, password)
+    return _login_in_default_browser_sync(email, password)
 
 
 def _extract_api_key(text: str) -> str | None:
@@ -361,6 +669,81 @@ def _decode_varint(payload: bytes, offset: int) -> tuple[int, int]:
             return result, offset
         shift += 7
     raise ValueError("Unexpected end of protobuf varint")
+
+
+def _decode_jwt_payload_without_verification(token: str) -> Dict:
+    parts = token.split(".")
+    if len(parts) < 2:
+        return {}
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(payload.encode("utf-8"))
+        decoded = json.loads(raw.decode("utf-8"))
+        return decoded if isinstance(decoded, dict) else {}
+    except Exception:
+        return {}
+
+
+def _extract_firebase_uid_from_id_token(firebase_id_token: str | None) -> str | None:
+    if not firebase_id_token:
+        return None
+    payload = _decode_jwt_payload_without_verification(firebase_id_token)
+    return payload.get("user_id") or payload.get("sub")
+
+
+def _logout_user_sync(firebase_uid: str) -> Dict:
+    endpoint = "https://windsurf.com/_backend/exa.seat_management_pb.SeatManagementService/LogOutUser"
+    request_payload = _encode_proto_string(1, firebase_uid)
+    headers = {
+        "Content-Type": "application/proto",
+        "Accept": "application/proto, application/connect+proto",
+        "Accept-Encoding": "identity",
+        "Connect-Protocol-Version": "1",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+    }
+    req = urllib_request.Request(endpoint, data=request_payload, headers=headers, method="POST")
+    try:
+        with urllib_request.urlopen(req, timeout=30) as resp:
+            payload = resp.read()
+            return {
+                "success": 200 <= resp.status < 300,
+                "status": resp.status,
+                "message": f"Logged out Windsurf user {firebase_uid}",
+                "body": payload,
+            }
+    except urllib_error.HTTPError as exc:
+        return {
+            "success": False,
+            "status": exc.code,
+            "message": f"LogOutUser failed with HTTP {exc.code}",
+            "body": exc.read(),
+        }
+    except Exception as exc:
+        return {"success": False, "message": f"LogOutUser failed: {exc}"}
+
+
+def _get_windows_logout_firebase_uid(email: str) -> str | None:
+    try:
+        from app.database import SessionLocal
+        from app import crud
+        db = SessionLocal()
+        try:
+            active_account = crud.get_active_account(db)
+            if active_account:
+                active_uid = _extract_firebase_uid_from_id_token(active_account.firebase_id_token)
+                if active_uid:
+                    return active_uid
+            target_account = crud.get_account_by_email(db, email)
+            if target_account:
+                target_uid = _extract_firebase_uid_from_id_token(target_account.firebase_id_token)
+                if target_uid:
+                    return target_uid
+        finally:
+            db.close()
+    except Exception:
+        return None
+    return None
 
 
 def _encode_proto_string(field_number: int, value: str) -> bytes:
@@ -755,7 +1138,7 @@ async def sync_account_state(email: str, password: str) -> Dict:
 
 
 async def web_login(email: str, password: str) -> Dict:
-    return await login_in_default_browser(email, password)
+    return login_in_default_browser(email, password)
 
 
 async def scrape_quota(email: str, password: str) -> Dict:

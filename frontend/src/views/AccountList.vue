@@ -7,10 +7,6 @@
           <el-icon><Plus /></el-icon>
           Add Account
         </el-button>
-        <el-button @click="handleRefreshAll" :loading="refreshingAll">
-          <el-icon><Refresh /></el-icon>
-          Refresh Quotas
-        </el-button>
         <el-button type="warning" @click="handleRefreshAllStatus" :loading="refreshingAllStatus">
           <el-icon><Refresh /></el-icon>
           Refresh All Status
@@ -32,6 +28,12 @@
         </template>
       </el-table-column>
       <el-table-column prop="email" label="Email" width="210" />
+      <el-table-column label="Refresh Time" width="170">
+        <template #default="{ row }">
+          <span v-if="row.quota_updated_at" style="font-size: 12px;">{{ formatRefreshTime(row.quota_updated_at) }}</span>
+          <span v-else style="color: #c0c4cc; font-size: 12px;">--</span>
+        </template>
+      </el-table-column>
       <el-table-column label="Status" width="80">
         <template #default="{ row }">
           <el-tag :type="row.is_active ? 'success' : 'info'" size="small">
@@ -86,7 +88,7 @@
               :loading="quotaLoadingId === row.id"
             >
               <el-icon><DataAnalysis /></el-icon>
-              Quota
+              Refresh Status
             </el-button>
             <el-button
               type="danger"
@@ -135,7 +137,7 @@
 import { ref, inject } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  deleteAccount, activateAccount, getQuota, refreshAllQuotas, refreshAllStatus
+  deleteAccount, activateAccount, getQuota, refreshAllStatus
 } from '../api/accounts.js'
 import AccountForm from '../components/AccountForm.vue'
 import QuotaBar from '../components/QuotaBar.vue'
@@ -148,10 +150,18 @@ const showForm = ref(false)
 const editingAccount = ref(null)
 const activatingId = ref(null)
 const quotaLoadingId = ref(null)
-const refreshingAll = ref(false)
 const refreshingAllStatus = ref(false)
 const showActivateResult = ref(false)
 const activateResult = ref(null)
+
+function formatRefreshTime(value) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return '--'
+  }
+  const pad = num => String(num).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
 
 function handleEdit(row) {
   editingAccount.value = { ...row }
@@ -205,24 +215,11 @@ async function handleQuota(row) {
   try {
     await getQuota(row.id)
     await fetchAccounts()
-    ElMessage.success('Quota refreshed')
+    ElMessage.success('Status refreshed')
   } catch (e) {
-    ElMessage.warning('Quota query failed: ' + (e.response?.data?.detail || e.message))
+    ElMessage.warning('Status refresh failed: ' + (e.response?.data?.detail || e.message))
   } finally {
     quotaLoadingId.value = null
-  }
-}
-
-async function handleRefreshAll() {
-  refreshingAll.value = true
-  try {
-    await refreshAllQuotas()
-    await fetchAccounts()
-    ElMessage.success('All quotas refreshed')
-  } catch (e) {
-    ElMessage.error('Refresh failed')
-  } finally {
-    refreshingAll.value = false
   }
 }
 
