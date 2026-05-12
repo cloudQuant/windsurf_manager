@@ -81,20 +81,26 @@ async def get_quota(account_id: int, db: Session = Depends(get_db)):
     account = crud.get_account(db, account_id)
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
-    remaining = None
-    if account.quota_total is not None and account.quota_used is not None:
-        remaining = account.quota_total - account.quota_used
-    return schemas.QuotaOut(
-        account_id=account.id,
-        name=account.name,
-        daily_quota_pct=account.daily_quota_pct,
-        weekly_quota_pct=account.weekly_quota_pct,
-        extra_balance=account.extra_balance,
-        quota_total=account.quota_total,
-        quota_used=account.quota_used,
-        quota_remaining=remaining,
-        quota_updated_at=account.quota_updated_at,
-    )
+    if result.get("success"):
+        remaining = None
+        quota_total = result.get("quota_total")
+        quota_used = result.get("quota_used")
+        if quota_total is not None and quota_used is not None:
+            remaining = quota_total - quota_used
+        return schemas.QuotaOut(
+            account_id=account.id,
+            name=result.get("display_name") or account.name,
+            daily_quota_pct=result.get("daily_quota_pct"),
+            weekly_quota_pct=result.get("weekly_quota_pct"),
+            extra_balance=result.get("extra_balance"),
+            quota_total=quota_total,
+            quota_used=quota_used,
+            quota_remaining=remaining,
+            quota_updated_at=account.quota_updated_at,
+        )
+    if not account.encrypted_password:
+        raise HTTPException(status_code=400, detail="No password stored. Please save the account password first.")
+    raise HTTPException(status_code=500, detail=result.get("message", "Quota refresh failed"))
 
 
 @router.post("/refresh-all-quotas")

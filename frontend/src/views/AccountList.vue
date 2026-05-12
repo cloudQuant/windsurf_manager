@@ -249,7 +249,23 @@ async function handleRefreshAllStatus() {
     const res = await refreshAllStatus()
     await fetchAccounts()
     const data = res.data
-    ElMessage.success(`Status refreshed: ${data.success_count}/${data.total_count} accounts updated`)
+    const failures = (data.results || [])
+      .filter(item => item && item.success === false && item.message)
+      .map(item => `${item.email || item.name || item.account_id}: ${item.message}`)
+    const maybeBrowserHint = failures.some(msg => /playwright|browser|chromium|chrome|edge/i.test(msg))
+    if (data.success_count === 0) {
+      const msg = data.message || 'All accounts failed to refresh'
+      const sample = failures.slice(0, 3).join('；')
+      if (maybeBrowserHint) {
+        ElMessage.warning(`${msg}. Check that Playwright browsers are installed. ${sample}`)
+      } else if (sample) {
+        ElMessage.warning(`${msg}. Example failures: ${sample}`)
+      } else {
+        ElMessage.warning(msg)
+      }
+    } else {
+      ElMessage.success(`Status refreshed: ${data.success_count}/${data.total_count} accounts updated`)
+    }
   } catch (e) {
     ElMessage.error('Refresh all status failed: ' + (e.response?.data?.detail || e.message))
   } finally {

@@ -54,7 +54,13 @@ def _sync_env_accounts():
         for email, password in accounts:
             existing = crud.get_account_by_email(db, email)
             if existing:
-                if not existing.encrypted_password:
+                stored_password = None
+                if existing.encrypted_password:
+                    try:
+                        stored_password = crud.decrypt_password(existing.encrypted_password)
+                    except Exception:
+                        stored_password = None
+                if stored_password != password:
                     crud.update_account(db, existing.id, password=password)
                     updated += 1
             else:

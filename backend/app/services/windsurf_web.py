@@ -18,12 +18,20 @@ from urllib import request as urllib_request
 LOGIN_URL = "https://windsurf.com/account/login"
 PROFILE_URL = "https://windsurf.com/profile"
 USAGE_URL = "https://windsurf.com/subscription/usage"
+MANAGE_PLAN_URL = "https://windsurf.com/subscription/manage-plan"
 CHROME_BUNDLE_ID = "com.google.chrome"
 CHROME_APP_NAME = "Google Chrome"
 LAUNCH_SERVICES_PLIST = os.path.expanduser("~/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist")
 WINDSURF_LOGOUT_SELECTOR = "body > div.flex.min-h-screen.flex-col > div > div > div.sticky.top-0.col-span-1.hidden.h-screen.shrink-0.flex-col.pb-6.pt-28.md\\:pt-36.lg\\:flex > div > div.mt-auto.flex.flex-col.gap-1.px-4 > div"
 WINDSURF_LOGOUT_XPATH = "/html/body/div[2]/div/div/div[1]/div/div[2]/div"
 WINDSURF_LOGOUT_LABELS = ["Log out", "Logout", "Sign out"]
+WINDSURF_EMAIL_SELECTOR = 'input[type="email"], input[name="email"], input[autocomplete="email"]'
+WINDSURF_PASSWORD_SELECTOR = 'input[type="password"], input[name="password"], input[autocomplete="current-password"]'
+# The email step shows "Continue →" plus OAuth buttons ("Continue with Google" etc.).
+# We must NOT click the OAuth buttons, so scope the Continue selector to the form that
+# actually holds the email input.
+WINDSURF_CONTINUE_SELECTOR = 'form:has(input[type="email"]) button[type="submit"]'
+WINDSURF_LOGIN_SELECTOR = 'form:has(input[type="password"]) button[type="submit"]'
 
 _IS_WINDOWS = sys.platform == "win32"
 _IS_MACOS = sys.platform == "darwin"
@@ -33,12 +41,39 @@ async def _new_context(headless: bool = False, channel: Optional[str] = None):
     from playwright.async_api import async_playwright
 
     pw = await async_playwright().start()
-    launch_kwargs = {"headless": headless}
+    attempts = []
     if channel:
-        launch_kwargs["channel"] = channel
-    browser = await pw.chromium.launch(**launch_kwargs)
-    context = await browser.new_context()
-    return pw, browser, context
+        attempts.append(("configured channel", {"headless": headless, "channel": channel}))
+    attempts.append(("bundled chromium", {"headless": headless}))
+    fallback_channels = ["chrome", "chromium"]
+    if _IS_WINDOWS:
+        fallback_channels.insert(1, "msedge")
+    for browser_channel in fallback_channels:
+        if not browser_channel:
+            continue
+        attempts.append((f"channel:{browser_channel}", {"headless": headless, "channel": browser_channel}))
+
+    last_error = None
+    for name, launch_kwargs in attempts:
+        try:
+            browser = await pw.chromium.launch(**launch_kwargs)
+            context = await browser.new_context()
+            return pw, browser, context
+        except Exception as exc:
+            if "browser" in locals() and browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            last_error = exc
+            continue
+
+    if pw:
+        try:
+            await pw.stop()
+        except Exception:
+            pass
+    raise RuntimeError(f"Failed to launch Playwright browser. Last error: {last_error}")
 
 
 def _default_browser_bundle_id() -> Optional[str]:
@@ -206,21 +241,44 @@ def _chrome_execute_js(js_code: str) -> Dict:
 
 
 def _build_windsurf_login_js(email: str, password: str) -> str:
+    """
+    Build a JS snippet that drives Windsurf's two-step login form.
+
+    Step 1 shows an email input with a "Continue →" submit button AND a stack of OAuth
+    buttons ("Continue with Google" etc.). We must click only the first. Step 2 shows a
+    password input with a "Log in" submit button.
+
+    We run on a 500 ms tick because the page is React-rendered and inputs might not be
+    mounted yet. A `state` flag ensures we never resubmit a step we have already
+    submitted, so we cannot accidentally re-fill + re-click during the transition
+    between steps.
+    """
     import json as _json
     return (
         "(()=>{"
+        "window.__wsLoginState=window.__wsLoginState||{step:null};"
+        "const state=window.__wsLoginState;"
         "const s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;"
-        "const e=document.querySelector('input[name=\"email\"],input[type=\"email\"]');"
-        "const p=document.querySelector('input[type=\"password\"]');"
-        "if(!e||!p)return;"
-        f"s.call(e,{_json.dumps(email)});"
-        "e.dispatchEvent(new Event('input',{bubbles:true}));"
-        f"s.call(p,{_json.dumps(password)});"
-        "p.dispatchEvent(new Event('input',{bubbles:true}));"
-        "setTimeout(()=>{"
-        "const b=[...document.querySelectorAll('button')].find(b=>/^log in$/i.test(b.textContent.trim()));"
-        "if(b)b.click()"
-        "},500)"
+        f"const emailSelector={_json.dumps(WINDSURF_EMAIL_SELECTOR)};"
+        f"const passwordSelector={_json.dumps(WINDSURF_PASSWORD_SELECTOR)};"
+        "const click=(el)=>{if(!el)return false;try{el.scrollIntoView({block:'center',inline:'center'});}catch(e){};for(const type of ['mouseover','mousedown','mouseup','click']){try{el.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,view:window}));}catch(e){}};try{el.click();}catch(e){};return true;};"
+        "const setValue=(el,value)=>{if(!el)return;s.call(el,value);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));};"
+        # Submit button scoped to the given input's enclosing <form>. This avoids the
+        # OAuth "Continue with ..." buttons on the email step.
+        "const submitFor=(input)=>{const form=input&&input.closest&&input.closest('form');if(form){const btn=form.querySelector('button[type=\"submit\"]');if(btn)return btn;}return null;};"
+        f"const emailValue={_json.dumps(email)};"
+        f"const passwordValue={_json.dumps(password)};"
+        "const started=Date.now();"
+        "const tick=()=>{"
+        "const p=document.querySelector(passwordSelector);"
+        "if(p&&state.step!=='password'){state.step='password';setValue(p,passwordValue);setTimeout(()=>click(submitFor(p)),150);}"
+        "else if(!p&&state.step!=='email'){"
+        "const e=document.querySelector(emailSelector);"
+        "if(e){state.step='email';setValue(e,emailValue);setTimeout(()=>click(submitFor(e)),150);}"
+        "}"
+        "if(Date.now()-started<25000){setTimeout(tick,500);}"
+        "};"
+        "tick();"
         "})()"
     )
 
@@ -249,6 +307,27 @@ def _build_windsurf_logout_js() -> str:
         "}"
         "})();"
     )
+
+
+async def _wait_for_windsurf_login_step(page, timeout_ms: int = 30000) -> None:
+    await page.wait_for_selector(
+        f"{WINDSURF_EMAIL_SELECTOR}, {WINDSURF_PASSWORD_SELECTOR}",
+        state="visible",
+        timeout=timeout_ms,
+    )
+
+
+async def _complete_windsurf_login(page, email: str, password: str) -> None:
+    email_locator = page.locator(WINDSURF_EMAIL_SELECTOR).first
+    password_locator = page.locator(WINDSURF_PASSWORD_SELECTOR).first
+
+    if await email_locator.count() > 0:
+        await email_locator.fill(email)
+        await page.locator(WINDSURF_CONTINUE_SELECTOR).first.click()
+        await page.wait_for_selector(WINDSURF_PASSWORD_SELECTOR, state="visible", timeout=30000)
+
+    await password_locator.fill(password)
+    await page.locator(WINDSURF_LOGIN_SELECTOR).first.click()
 
 
 def _login_in_default_browser_chrome(email: str, password: str) -> Dict:
@@ -633,6 +712,8 @@ def _normalize_plan_type(value: str | None) -> str | None:
         return "Pro"
     if "individual" in lowered:
         return "Individual"
+    if lowered == "free" or lowered.startswith("free"):
+        return "Free"
     return value
 
 
@@ -909,14 +990,12 @@ async def _login(page, email: str, password: str) -> Dict:
     await page.goto(LOGIN_URL, timeout=60000, wait_until="networkidle")
 
     try:
-        await page.wait_for_selector('input[placeholder="Enter your email address"]', state="visible", timeout=30000)
+        await _wait_for_windsurf_login_step(page, timeout_ms=30000)
     except Exception:
         await asyncio.sleep(10)
-        await page.wait_for_selector('input[placeholder="Enter your email address"]', state="visible", timeout=30000)
+        await _wait_for_windsurf_login_step(page, timeout_ms=30000)
 
-    await page.locator('input[placeholder="Enter your email address"]').fill(email)
-    await page.locator('input[placeholder="Enter your password"]').fill(password)
-    await page.locator('button:has-text("Log in")').first.click()
+    await _complete_windsurf_login(page, email, password)
     await asyncio.sleep(8)
 
     url = page.url
@@ -933,6 +1012,20 @@ async def _login(page, email: str, password: str) -> Dict:
         return {"success": False, "message": f"Login failed: still on login page ({url})"}
 
     return {"success": True, "message": f"Logged in as {email}", "url": url}
+
+
+async def _scrape_plan_type(page) -> str | None:
+    """Scrape plan type from the manage plan page."""
+    await page.goto(MANAGE_PLAN_URL, timeout=30000, wait_until="networkidle")
+    await asyncio.sleep(1)
+    plan_text = await page.evaluate(
+        """() => {
+            const body = document.body?.innerText || '';
+            const m = body.match(/currently on a\\s+([\\w\\s]+?)\\s+plan/i);
+            return m ? m[1].trim() : null;
+        }"""
+    )
+    return _normalize_plan_type(plan_text)
 
 
 async def _scrape_profile(page) -> Dict:
@@ -956,11 +1049,12 @@ async def _scrape_profile(page) -> Dict:
     body = "\n".join(profile_data.get("texts") or [])
     display_name = profile_data.get("heading") or None
 
+    plan_tokens = ["trial", "pro", "team", "enterprise", "individual", "free"]
     plan_type = _normalize_plan_type(
         next(
             (
                 value for value in (profile_data.get("texts") or [])
-                if any(token in value.lower() for token in ["trial", "pro", "team", "enterprise", "individual"])
+                if any(token in value.lower() for token in plan_tokens)
             ),
             None,
         )
@@ -969,6 +1063,13 @@ async def _scrape_profile(page) -> Dict:
     storage_text = await _extract_storage_text(page)
     html = await page.content()
     api_key = _extract_api_key(body) or _extract_api_key(storage_text) or _extract_api_key(html)
+
+    # If plan_type not found on profile page, check manage plan page
+    if not plan_type:
+        try:
+            plan_type = await _scrape_plan_type(page)
+        except Exception:
+            pass
 
     return {
         "display_name": display_name,

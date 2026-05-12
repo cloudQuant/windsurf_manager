@@ -26,8 +26,15 @@ ACCOUNTS = [
 LOGIN_URL = "https://windsurf.com/account/login"
 PROFILE_URL = "https://windsurf.com/profile"
 USAGE_URL = "https://windsurf.com/subscription/usage"
+MANAGE_PLAN_URL = "https://windsurf.com/subscription/manage-plan"
 API_BASE = "http://127.0.0.1:8001/api/accounts"
 SCREENSHOT_DIR = os.path.join(os.path.dirname(__file__), "login_screenshots")
+WINDSURF_EMAIL_SELECTOR = 'input[type="email"], input[name="email"], input[autocomplete="email"]'
+WINDSURF_PASSWORD_SELECTOR = 'input[type="password"], input[name="password"], input[autocomplete="current-password"]'
+# The email step includes OAuth "Continue with X" buttons; scope Continue/Log-in to
+# the form that actually contains the email / password input.
+WINDSURF_CONTINUE_SELECTOR = 'form:has(input[type="email"]) button[type="submit"]'
+WINDSURF_LOGIN_SELECTOR = 'form:has(input[type="password"]) button[type="submit"]'
 
 
 def find_account_id(email: str) -> int | None:
@@ -51,7 +58,7 @@ def update_backend(account_id: int, profile_data: dict):
 
 
 async def scrape_profile(page) -> dict:
-    """Scrape display_name and plan_type from the profile page."""
+    """Scrape display_name and plan_type from profile + manage plan pages."""
     info = {}
     try:
         await page.goto(PROFILE_URL, timeout=30000)
@@ -65,13 +72,29 @@ async def scrape_profile(page) -> dict:
         except Exception:
             pass
 
-        # Plan type - look for common plan tags
-        for plan in ["Free trial", "Pro", "Team", "Enterprise", "Individual"]:
+        # Plan type - look for common plan tags on profile page
+        for plan in ["Free trial", "Pro", "Team", "Enterprise", "Individual", "Free"]:
             if plan.lower() in body.lower():
                 info["plan_type"] = plan
                 break
     except Exception as e:
         print(f"    [warn] Profile scrape error: {e}")
+
+    # If plan_type not found on profile, check manage plan page
+    if "plan_type" not in info:
+        try:
+            await page.goto(MANAGE_PLAN_URL, timeout=30000)
+            await asyncio.sleep(2)
+            plan_text = await page.evaluate("""() => {
+                const body = document.body?.innerText || '';
+                const m = body.match(/currently on a\\s+([\\w\\s]+?)\\s+plan/i);
+                return m ? m[1].trim() : null;
+            }""")
+            if plan_text:
+                info["plan_type"] = plan_text
+        except Exception as e:
+            print(f"    [warn] Manage plan scrape error: {e}")
+
     return info
 
 
@@ -110,14 +133,14 @@ async def login_one(browser, name: str, email: str, password: str) -> dict:
         # Wait for email input (handles Cloudflare wait)
         try:
             await page.wait_for_selector(
-                'input[placeholder="Enter your email address"]',
+                f'{WINDSURF_EMAIL_SELECTOR}, {WINDSURF_PASSWORD_SELECTOR}',
                 state="visible", timeout=30000
             )
         except Exception:
             await asyncio.sleep(10)
             try:
                 await page.wait_for_selector(
-                    'input[placeholder="Enter your email address"]',
+                    f'{WINDSURF_EMAIL_SELECTOR}, {WINDSURF_PASSWORD_SELECTOR}',
                     state="visible", timeout=30000
                 )
             except Exception:
@@ -127,11 +150,18 @@ async def login_one(browser, name: str, email: str, password: str) -> dict:
                         "detail": "Login form not found (Cloudflare?)"}
 
         # Fill credentials
-        await page.locator('input[placeholder="Enter your email address"]').fill(email)
+        email_locator = page.locator(WINDSURF_EMAIL_SELECTOR).first
+        password_locator = page.locator(WINDSURF_PASSWORD_SELECTOR).first
+
+        if await email_locator.count() > 0:
+            await email_locator.fill(email)
+            await asyncio.sleep(0.3)
+            await page.locator(WINDSURF_CONTINUE_SELECTOR).first.click()
+            await page.wait_for_selector(WINDSURF_PASSWORD_SELECTOR, state="visible", timeout=30000)
+
+        await password_locator.fill(password)
         await asyncio.sleep(0.3)
-        await page.locator('input[placeholder="Enter your password"]').fill(password)
-        await asyncio.sleep(0.3)
-        await page.locator('button:has-text("Log in")').first.click()
+        await page.locator(WINDSURF_LOGIN_SELECTOR).first.click()
 
         # Wait for redirect
         await asyncio.sleep(6)
